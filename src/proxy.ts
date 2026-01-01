@@ -2,55 +2,35 @@ import { NextRequest, NextResponse } from "next/server"
 import { redis } from "./lib/redis"
 import { nanoid } from "nanoid"
 
-type RoomMeta = {
-  connected: string[]
-  createdAt: number
-}
-
 export const proxy = async (req: NextRequest) => {
   const pathname = req.nextUrl.pathname
-
   const roomMatch = pathname.match(/^\/room\/([^/]+)$/)
-  if (!roomMatch) {
-    return NextResponse.redirect(new URL("/", req.url))
-  }
+  
+  if (!roomMatch) return NextResponse.redirect(new URL("/", req.url))
 
   const roomId = roomMatch[1]
-
-  // ===== جلب البيانات الخام من Redis =====
-  const rawMeta = await redis.hgetall<Record<string, string>>(
+  const meta = await redis.hgetall<{ connected: string[]; createdAt: number }>(
     `meta:${roomId}`
   )
 
-  if (!rawMeta || Object.keys(rawMeta).length === 0) {
-    return NextResponse.redirect(
-      new URL("/?error=room-not-found", req.url)
-    )
-  }
-
-  // ===== تحويل القيم للأنواع الصحيحة =====
-  const meta: RoomMeta = {
-    connected: rawMeta.connected
-      ? JSON.parse(rawMeta.connected)
-      : [],
-    createdAt: Number(rawMeta.createdAt),
+  if (!meta) {
+    return NextResponse.redirect(new URL("/?error=room-not-found", req.url))
   }
 
   const existingToken = req.cookies.get("x-auth-token")?.value
 
-  // ===== المستخدم موجود مسبقًا =====
+  // 1. Check if user is already registered in this room
   if (existingToken && meta.connected.includes(existingToken)) {
     return NextResponse.next()
   }
 
-  // ===== الغرفة ممتلئة =====
-  if (meta.connected.length >= 2) {
-    return NextResponse.redirect(
-      new URL("/?error=room-full", req.url)
-    )
+  // 2. Updated Limit: Check if the room is full (Allowing 3 users)
+  // Changed from >= 2 to >= 3
+  if (meta.connected.length >= 3) {
+    return NextResponse.redirect(new URL("/?error=room-full", req.url))
   }
 
-  // ===== السماح بالدخول =====
+  // 3. New User Setup
   const response = NextResponse.next()
   const token = nanoid()
 
@@ -61,9 +41,12 @@ export const proxy = async (req: NextRequest) => {
     sameSite: "strict",
   })
 
-  // ===== تحديث Redis بشكل صحيح =====
+  // 4. Update Redis
+  // Note: In a production app with high traffic, consider using 
+  // redis.eval with a Lua script to ensure this update is atomic.
   await redis.hset(`meta:${roomId}`, {
-    connected: JSON.stringify([...meta.connected, token]),
+    ...meta, // Keep existing fields like createdAt
+    connected: [...meta.connected, token],
   })
 
   return response
